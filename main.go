@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"html"
 	"io/ioutil"
 	"log"
 	"os"
@@ -17,6 +18,8 @@ import (
 )
 
 // Define useful datatypes
+
+// ------------------------------------------------------------------------------
 type Bbox struct {
 	X0 int
 	Y0 int
@@ -56,6 +59,21 @@ func (in Bbox) contained(out Bbox) bool {
 	return in.X0 >= out.X0 && in.X1 <= out.X1 && in.Y0 >= out.Y0 && in.Y1 <= out.Y1
 }
 
+// ------------------------------------------------------------------------------
+type ReferenceWords struct {
+	Words []string
+	Page  int
+}
+
+// ------------------------------------------------------------------------------
+type Letter struct {
+	Value      string
+	References []ReferenceWords
+	Page       int
+}
+
+// ------------------------------------------------------------------------------
+
 // Start main code
 
 func main() {
@@ -65,6 +83,7 @@ func main() {
 	// Flag declaration
 	root := flag.String("input", "", "Input folder with hOCR files to process")
 	startPage := flag.Int("start-page", 0, "Page where dictionary content starts (index starts with 0)")
+	endPage := flag.Int("end-page", -1, "Page where dictionary content ends")
 	required := []string{"input"}
 	flag.Parse()
 
@@ -81,30 +100,88 @@ func main() {
 	infoLog.Println(fmt.Sprintf("%s - %d", *root, *startPage))
 	hocrFiles := getFiles(root)
 
-	page, err := gohocr.Parse(filepath.Join(*root, (*hocrFiles)[40]))
-	if err != nil {
-		errorLog.Println(fmt.Sprintf("Error parsing hOCR file: %s", err))
-		return
-	}
-
 	// Define BBOX to search for tile letter in the dictionary
 	titleBbox := Bbox{X0: 0, Y0: 300, X1: 3200, Y1: 700}
 	// Define BBOX to search for index letter in dictionary page
-	indexBbox := Bbox{X0: 0, Y0: 150, X1: 3200, Y1: 300}
+	indexBbox := Bbox{X0: 0, Y0: 0, X1: 3200, Y1: 310}
 
-	// Search title letter
-	words := getWordsInBbox(page, titleBbox)
-	infoLog.Println(fmt.Sprintf("%+v", (*words)))
+	letterList := []Letter{}
 
-	page, err = gohocr.Parse(filepath.Join(*root, (*hocrFiles)[127]))
-	if err != nil {
-		errorLog.Println(fmt.Sprintf("Error parsing hOCR file: %s", err))
-		return
+	if *endPage == -1 || *endPage >= len(*hocrFiles) {
+		*endPage = len(*hocrFiles) - 1
 	}
 
-	// Search index words
-	words = getWordsInBbox(page, indexBbox)
-	infoLog.Println(fmt.Sprintf("%+v", (*words)))
+	for index, hocrFile := range (*hocrFiles)[*startPage:*endPage] {
+		pageNumber := (*startPage) + index
+		page, err := gohocr.Parse(filepath.Join(*root, hocrFile))
+		if err != nil {
+			errorLog.Println(fmt.Sprintf("Error parsing hOCR file: %s", err))
+			return
+		}
+
+		// Search index words
+		words := getWordsInBbox(page, indexBbox)
+		references := extractReferenceWords(words, pageNumber)
+		if references != nil && len((*references).Words) > 1 {
+			if len((*references).Words) > 2 {
+				lastIdx := len((*references).Words) - 1
+				words := []string{(*references).Words[0], (*references).Words[lastIdx]}
+				(*references).Words = words
+			}
+
+			if len(letterList) == 0 {
+				errorLog.Println(fmt.Sprintf("Skipped reference letter before finding reference words. Check page order and starting page"))
+
+				letter := Letter{Value: "-NOT FOUND-", References: []ReferenceWords{}, Page: -1}
+				letterList = append(letterList, letter)
+			}
+
+			currentLetter := &(letterList[len(letterList)-1])
+
+			checkFirstLetter1 := string([]rune(strings.ToLower((*references).Words[0]))[0])
+			checkFirstLetter2 := string([]rune(strings.ToLower((*references).Words[1]))[0])
+			if checkFirstLetter1 == "-" {
+				checkFirstLetter1 = string([]rune(strings.ToLower((*references).Words[0]))[1])
+			}
+			if checkFirstLetter2 == "-" {
+				checkFirstLetter2 = string([]rune(strings.ToLower((*references).Words[1]))[1])
+			}
+
+			letterRune := string([]rune(strings.ToLower(currentLetter.Value))[0])
+
+			if letterRune != checkFirstLetter1 && letterRune != checkFirstLetter2 {
+				infoLog.Println(fmt.Sprintf("%s, %+v", letterRune, (*references).Words))
+				errorLog.Println(fmt.Sprintf("Infering change of current letter from reference words. Check hOCR output."))
+
+				letter := Letter{Value: strings.ToUpper(string(checkFirstLetter1)), References: []ReferenceWords{}, Page: -1}
+				letterList = append(letterList, letter)
+
+				currentLetter = &(letterList[len(letterList)-1])
+			}
+
+			(*currentLetter).References = append((*currentLetter).References, *references)
+
+			continue
+		}
+
+		// Search title letter
+		words = getWordsInBbox(page, titleBbox)
+		if len(*words) == 1 {
+			letter := Letter{Value: (*words)[0].Content, References: []ReferenceWords{}, Page: pageNumber}
+			letterList = append(letterList, letter)
+
+			continue
+		}
+
+		// Notify pages not parsed to debug
+		infoLog.Println(fmt.Sprintf("Page %d ignored: %+v", pageNumber, references))
+	}
+
+	infoLog.Println(fmt.Sprintf("%d", len(letterList)))
+
+	for _, letter := range letterList {
+		infoLog.Println(fmt.Sprintf("%s, %d", letter.Value, letter.Page))
+	}
 }
 
 func extension(fileName string) string {
@@ -172,4 +249,27 @@ func getWordsInBbox(page gohocr.Page, out Bbox) *[]gohocr.Word {
 	}
 
 	return &words
+}
+
+func cleanWord(in string) string {
+	return strings.Trim(html.UnescapeString(in), " “.':„")
+}
+
+func extractReferenceWords(words *[]gohocr.Word, pageNumber int) *ReferenceWords {
+	re, _ := regexp.Compile(`^-?[\p{L}][-.]?[\p{L}]+[/!]?$`)
+
+	reference := ReferenceWords{
+		Words: []string{},
+		Page:  pageNumber,
+	}
+
+	for _, w := range *words {
+		candidate := cleanWord(w.Content)
+		//fmt.Println(candidate)
+		if re.MatchString(candidate) {
+			reference.Words = append(reference.Words, candidate)
+		}
+	}
+
+	return &reference
 }
