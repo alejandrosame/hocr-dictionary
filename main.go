@@ -16,6 +16,49 @@ import (
     "github.com/alejandrosame/gohocr"
 )
 
+// Define useful datatypes
+type Bbox struct {
+    X0 int
+    Y0 int
+    X1 int
+    Y1 int
+}
+
+
+func parseBbox(title string) Bbox {
+    bbox := Bbox{}
+    re, _ := regexp.Compile(`bbox \d+ \d+ \d+ \d+;`)
+
+    bboxStr := re.FindString(title)
+
+    if bboxStr == "" {
+        bbox.X0 = -1
+        bbox.Y0 = -1
+        bbox.X1 = -1
+        bbox.Y1 = -1
+        return bbox
+    }
+
+    splitted := strings.Split(bboxStr[:len(bboxStr)-1], " ")
+
+    bbox.X0, _ = strconv.Atoi(splitted[1])
+    bbox.Y0, _ = strconv.Atoi(splitted[2])
+    bbox.X1, _ = strconv.Atoi(splitted[3])
+    bbox.Y1, _ = strconv.Atoi(splitted[4])
+
+    return bbox
+}
+
+
+func (b Bbox) String() string {
+    return fmt.Sprintf("BBOX %d %d %d %d", b.X0, b.Y0, b.X1, b.Y1)
+}
+
+func (in Bbox) contained(out Bbox) bool {
+    return in.X0 >= out.X0 && in.X1 <= out.X1 && in.Y0 >= out.Y0 && in.Y1 <= out.Y1
+}
+
+// Start main code
 
 func main() {
     infoLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
@@ -38,7 +81,6 @@ func main() {
     }
 
     infoLog.Println(fmt.Sprintf("%s - %d", *root, *startPage))
-    //fileNames := getFiles(root) 
     hocrFiles := getFiles(root) 
 
     page, err := gohocr.Parse(filepath.Join(*root, (*hocrFiles)[40]))
@@ -47,8 +89,13 @@ func main() {
         return
     }
 
+    // Define BBOX to search for tile letter in the dictionary
+    titleBbox := Bbox{X0: 0, Y0: 300, X1: 3200, Y1: 700}
+    // Define BBOX to search for index letter in dictionary page
+    indexBbox := Bbox{X0: 0, Y0: 150, X1: 3200, Y1: 300}
+
     // Search title letter
-    words := getWordsInBbox(page, 0, 300, 3200, 700)
+    words := getWordsInBbox(page, titleBbox)
     infoLog.Println(fmt.Sprintf("%+v", (*words)))
 
     page, err = gohocr.Parse(filepath.Join(*root, (*hocrFiles)[127]))
@@ -58,7 +105,7 @@ func main() {
     }
 
     // Search index words
-    words = getWordsInBbox(page, 0, 150, 3200, 300)
+    words = getWordsInBbox(page, indexBbox)
     infoLog.Println(fmt.Sprintf("%+v", (*words)))
 }
 
@@ -118,39 +165,13 @@ func getFiles(root *string) *[]string {
     return &fileNames
 }
 
-
-func parseBbox(title string) (int, int, int, int) {
-    re, _ := regexp.Compile(`bbox \d+ \d+ \d+ \d+;`)
-
-    bbox := re.FindString(title)
-
-    if bbox == "" {
-        return -1, -1, -1, -1
-    }
-    
-    splitted := strings.Split(bbox[:len(bbox)-1], " ")
-
-    x0, _ := strconv.Atoi(splitted[1])
-    y0, _ := strconv.Atoi(splitted[2])
-    x1, _ := strconv.Atoi(splitted[3])
-    y1, _ := strconv.Atoi(splitted[4])
-
-    return x0, y0, x1, y1
-}
-
-
-func contained(xIn0, yIn0, xIn1, yIn1, xOut0, yOut0, xOut1, yOut1 int) bool {
-    return xIn0 >= xOut0 && xIn1 <= xOut1 && yIn0 >= yOut0 && yIn1 <= yOut1
-}
-
-
-func getWordsInBbox(page gohocr.Page, X0, Y0, X1, Y1 int) *[]gohocr.Word {
+func getWordsInBbox(page gohocr.Page, out Bbox) *[]gohocr.Word {
     words := []gohocr.Word{}
 
     for _, word := range page.Words {
-        x0, y0, x1, y1 := parseBbox(word.Title)
+        wordBbox := parseBbox(word.Title)
 
-        if contained(x0, y0, x1, y1, X0, Y0, X1, Y1) {
+        if wordBbox.contained(out) {
             words = append(words, word)
         }
     }
